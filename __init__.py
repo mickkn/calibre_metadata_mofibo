@@ -34,11 +34,17 @@ class Mofibo(Source):
     minimum_calibre_version = (5, 0, 1)
 
     capabilities = frozenset(['identify', 'cover'])
-    touched_fields = frozenset(['identifier:isbn', 'title', 'authors', 'rating', 'comments', 'publisher', 'language', 'pubdate'])
+    touched_fields = frozenset(['identifier:isbn', 'title', 'authors', 'comments', 'publisher', 'language', 'pubdate'])
 
     supports_gzip_transfer_encoding = True
 
-    BASE_URL = 'https://www.saxo.com/dk/products/search?query='
+    ID_NAME = 'mofibo'
+    BASE_URL = 'https://mofibo.com/dk/da/soeg-'
+
+    def get_book_url(self, identifiers):
+        mofibo_id = identifiers.get(self.ID_NAME, None)
+        if mofibo_id:
+            return ('Mofibo', mofibo_id, self.url)
 
     def identify(self, log, result_queue, abort, title=None, authors=None, identifiers={}, timeout=30):
         '''
@@ -54,7 +60,16 @@ class Mofibo(Source):
         isbn = identifiers.get('isbn', None)
         if isbn:
             print("    Found isbn %s" % (isbn))
-            matches.append('%s%s' % (Saxo.BASE_URL, isbn))
+            search = ('%s%s' % (Mofibo.BASE_URL, isbn))
+        
+            mofibo_raw = br.open_novisit(search, timeout=30).read().strip()
+            mofibo_root = parse(mofibo_raw)
+            mofibo_nodes = mofibo_root.xpath('(//div[@class="gridCover"])//a/@href')
+            log.info(mofibo_nodes)
+            for url in mofibo_nodes[:1]:
+                matches.append("https://mofibo.com" + url)
+        
+        
         # Return if no ISBN
         if abort.is_set():
             return
@@ -230,54 +245,51 @@ class Worker(Thread):  # Get details
             self.log.error("Error cleaning HTML")
             return
 
-        # Get the json data within the HTML code (some stuff is easier to get with json)
-        try:
-            json_raw = root.xpath('(//script[@type="application/ld+json"])[2]')
-            json_root = json.loads(json_raw[0].text.strip())
-            #print(json.dumps(json_root, indent=4, sort_keys=True))
-        except:
-            self.log.error("Error loading JSON data")
-            return
-
         # Get the title of the book
         try:
-            self.title = json_root['name']
+            title_node = root.xpath('//span[@itemprop="name"]')
+            self.title = title_node[0].text
         except:
             self.log.exception('Error parsing title for url: %r' % self.url)
 
         # Get the author of the book
         try:
-            author_node = root.xpath('//h2[@class="product-page-heading__autor"]//a')
+            author_node = root.xpath('//span[@class="expandAuthorName"]')
+            author_node = author_node[0].text.split(",")
             for name in author_node:
-                self.authors.append(name.text.strip())
+                self.authors.append(name)
         except:
             self.log.exception('Error parsing authors for url: %r' % self.url)
             self.authors = None
 
         # Some books have ratings, let's use them.
         try:
-            self.rating = float(json_root['aggregateRating']['ratingValue'])
+            self.rating = 0.0
         except:
             self.log.exception('Error parsing rating for url: %r' % self.url)
             self.rating = 0.0
 
         # Get the ISBN number from the site
         try:
-            self.isbn = json_root['isbn']
+            isbn_node = root.xpath('//div[@class="eBookContainer"]/b/span[@itemprop="identifier"]')
+            self.isbn = isbn_node[0].text.replace("ISBN: ", "")
         except:
             self.log.exception('Error parsing isbn for url: %r' % self.url)
             self.isbn = None
 
         # Get the comments/blurb for the book
         try:
-            self.comments = parse_comments(root)
+            comment_node = root.xpath('//meta[@name="description"]/@content')
+            self.comments = comment_node[0]
         except:
             self.log.exception('Error parsing comments for url: %r' % self.url)
             self.comments = None
 
         # Parse the cover url for downloading the cover.
         try:
-            self.cover_url = json_root['image']
+            cover_node = root.xpath('//div[@class="bookDetailCoverCover"]/img/@src')
+            self.cover_url = "https://mofibo.com" + cover_node[0]
+            #print("'%s'" % self.cover_url)
             self.log.info('    Parsed URL for cover: %r' % self.cover_url)
             self.plugin.cache_identifier_to_cover_url(self.isbn, self.cover_url)
         except:
@@ -286,13 +298,15 @@ class Worker(Thread):  # Get details
 
         # Get the publisher name
         try:
-            self.publisher = json_root['publisher']['name']
+            publisher_node = root.xpath('//div[@class="eBookContainer"]/b/span/a[@itemprop="brand"]')
+            self.publisher = publisher_node[0].text
         except:
             self.log.exception('Error parsing publisher for url: %r' % self.url)
 
         # Get the language of the book. Only english and danish are supported tho
         try:
-            language = json_root['inLanguage']['name']
+            language_node = root.xpath('//b[@class="expanderLanguage"]')
+            language = language_node[0].text.strip().replace("Sprog:", "").replace(" ", "")
             language = self.lang_map.get(language, None)
             self.language = language
         except:
@@ -300,10 +314,9 @@ class Worker(Thread):  # Get details
 
         # Get the publisher date
         try:
-            #pubdate_node = root.xpath('(//dl[@class="product-info-list"]//dd)[2]') # Format dd-mm-yyyy
-            pubdate_node = root.xpath('//div[@class="product-page-block__container"]//dd') # Format dd-mm-yyyy
-            date_str = pubdate_node[0].text.strip()
-            format_str = '%d-%m-%Y' # The format
+            pubdate_node = root.xpath('//div[@class="eBookContainer"]/b[contains(text(),"Udgivet")]')
+            date_str = pubdate_node[0].text.replace("Udgivet:", "").strip()
+            format_str = '%Y-%m-%d' # The format
             self.pubdate = datetime.datetime.strptime(date_str, format_str)
         except:
             self.log.exception('Error parsing published date for url: %r' % self.url)
@@ -313,11 +326,13 @@ class Worker(Thread):  # Get details
         meta_data.set_identifier('isbn', self.isbn)
 
         # Set rating
+        """
         if self.rating:
             try:
                 meta_data.rating = self.rating
             except:
                 self.log.exception('Error loading rating')
+        """
         # Set ISBN
         if self.isbn:
             try:
@@ -390,4 +405,4 @@ if __name__ == '__main__':  # tests
             )
             ]
 
-    test_identify_plugin(Saxo.name, tests)
+    test_identify_plugin(Mofibo.name, tests)
