@@ -34,7 +34,7 @@ class Mofibo(Source):
     minimum_calibre_version = (5, 0, 1)
 
     capabilities = frozenset(['identify', 'cover'])
-    touched_fields = frozenset(['identifier:isbn', 'title', 'authors', 'comments', 'publisher', 'language', 'pubdate'])
+    touched_fields = frozenset(['identifier:isbn', 'identifier:mofibo', 'title', 'authors', 'tags', 'comments', 'publisher', 'language', 'pubdate'])
 
     supports_gzip_transfer_encoding = True
 
@@ -56,6 +56,12 @@ class Mofibo(Source):
         # Initialize browser object
         br = self.browser
         
+        # Add mofibo url to matches if present
+        mofibo = identifiers.get('mofibo', None)
+        if mofibo:
+            print("    Found comicwiki %s" % (mofibo))
+            matches.append(mofibo)
+
         # Get ISBN number and report
         isbn = identifiers.get('isbn', None)
         if isbn:
@@ -66,7 +72,7 @@ class Mofibo(Source):
             mofibo_root = parse(mofibo_raw)
             mofibo_nodes = mofibo_root.xpath('(//div[@class="gridCover"])//a/@href')
             log.info(mofibo_nodes)
-            for url in mofibo_nodes[:1]:
+            for url in mofibo_nodes[:5]:
                 matches.append("https://mofibo.com" + url)
         
         
@@ -189,6 +195,7 @@ class Worker(Thread):  # Get details
         self.authors = []
         self.comments = None
         self.pubdate = None
+        self.tags = None
 
         # Mapping language to something calibre understand.
         lm = {
@@ -272,7 +279,7 @@ class Worker(Thread):  # Get details
         # Get the ISBN number from the site
         try:
             isbn_node = root.xpath('//div[@class="eBookContainer"]/b/span[@itemprop="identifier"]')
-            self.isbn = isbn_node[0].text.replace("ISBN: ", "")
+            self.isbn = isbn_node[0].text.replace("ISBN: ", "").strip()
         except:
             self.log.exception('Error parsing isbn for url: %r' % self.url)
             self.isbn = None
@@ -289,7 +296,6 @@ class Worker(Thread):  # Get details
         try:
             cover_node = root.xpath('//div[@class="bookDetailCoverCover"]/img/@src')
             self.cover_url = "https://mofibo.com" + cover_node[0]
-            #print("'%s'" % self.cover_url)
             self.log.info('    Parsed URL for cover: %r' % self.cover_url)
             self.plugin.cache_identifier_to_cover_url(self.isbn, self.cover_url)
         except:
@@ -321,9 +327,17 @@ class Worker(Thread):  # Get details
         except:
             self.log.exception('Error parsing published date for url: %r' % self.url)
 
+        # Get the tags
+        try:
+            tags_node = root.xpath('//span[@itemprop="category"]')
+            self.tags = tags_node[0].text.split()
+        except:
+            self.log.exception('Error parsing published date for url: %r' % self.url)
+
         # Setup the metadata
         meta_data = Metadata(self.title, self.authors)
         meta_data.set_identifier('isbn', self.isbn)
+        meta_data.set_identifier('mofibo', self.url)
 
         # Set rating
         """
@@ -375,6 +389,12 @@ class Worker(Thread):  # Get details
                 meta_data.pubdate = self.pubdate
             except:
                 self.log.exception('Error loading pubdate')
+        # Set tags data
+        if self.tags:
+            try:
+                meta_data.tags = self.tags
+            except:
+                self.log.exception('Error loading tags')
 
         # Put meta data
         self.plugin.clean_downloaded_metadata(meta_data)
