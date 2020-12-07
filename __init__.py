@@ -72,9 +72,19 @@ class Mofibo(Source):
             mofibo_root = parse(mofibo_raw)
             mofibo_nodes = mofibo_root.xpath('(//div[@class="gridCover"])//a/@href')
             log.info(mofibo_nodes)
-            for url in mofibo_nodes[:5]:
+            for url in mofibo_nodes[:1]:
                 matches.append("https://mofibo.com" + url)
         
+        if title:
+            print("    Found title %s" % (title))
+            search = ('%s%s' % (Mofibo.BASE_URL, title))
+        
+            mofibo_raw = br.open_novisit(search, timeout=30).read().strip()
+            mofibo_root = parse(mofibo_raw)
+            mofibo_nodes = mofibo_root.xpath('(//div[@class="gridCover"])//a/@href')
+            log.info(mofibo_nodes)
+            for url in mofibo_nodes[:3]:
+                matches.append("https://mofibo.com" + url)
         
         # Return if no ISBN
         if abort.is_set():
@@ -320,7 +330,7 @@ class Worker(Thread):  # Get details
 
         # Get the publisher date
         try:
-            pubdate_node = root.xpath('//div[@class="eBookContainer"]/b[contains(text(),"Udgivet")]')
+            pubdate_node = root.xpath('//div[@class="eBookContainer"]/b[contains(text(),"Udgivet:")]')
             date_str = pubdate_node[0].text.replace("Udgivet:", "").strip()
             format_str = '%Y-%m-%d' # The format
             self.pubdate = datetime.datetime.strptime(date_str, format_str)
