@@ -34,7 +34,7 @@ class Mofibo(Source):
     minimum_calibre_version = (5, 0, 1)
 
     capabilities = frozenset(['identify', 'cover'])
-    touched_fields = frozenset(['identifier:isbn', 'identifier:mofibo', 'title', 'authors', 'tags', 'comments', 'publisher', 'language', 'pubdate'])
+    touched_fields = frozenset(['identifier:isbn', 'identifier:mofibo', 'title', 'authors', 'series', 'tags', 'comments', 'publisher', 'language', 'pubdate'])
 
     supports_gzip_transfer_encoding = True
 
@@ -59,7 +59,7 @@ class Mofibo(Source):
         # Add mofibo url to matches if present
         mofibo = identifiers.get('mofibo', None)
         if mofibo:
-            print("    Found comicwiki %s" % (mofibo))
+            print("    Found mofibo %s" % (mofibo))
             matches.append(mofibo)
 
         # Get ISBN number and report
@@ -67,12 +67,12 @@ class Mofibo(Source):
         if isbn:
             print("    Found isbn %s" % (isbn))
             search = ('%s%s' % (Mofibo.BASE_URL, isbn))
-        
+            log.info("Search: %s" % search)
             mofibo_raw = br.open_novisit(search, timeout=30).read().strip()
             mofibo_root = parse(mofibo_raw)
             mofibo_nodes = mofibo_root.xpath('(//div[@class="gridCover"])//a/@href')
             log.info(mofibo_nodes)
-            for url in mofibo_nodes[:1]:
+            for url in mofibo_nodes[:3]:
                 matches.append("https://mofibo.com" + url)
         
         if title:
@@ -164,26 +164,6 @@ class Mofibo(Source):
         except:
             log.exception('Failed to download cover from:', cached_url)
 
-def parse_comments(root):
-    '''
-    Function for parsing comments and clean them up a little
-    Re-written script from the Goodreads script
-    '''
-    # Look for description
-    description_node = root.xpath('(//div[@class="product-page-block"]//p)[1]')
-    if description_node:
-        desc = description_node[0] if len(description_node) == 1 else description_node[1]
-        less_link = desc.xpath('a[@class="actionLinkLite"]')
-        if less_link is not None and len(less_link):
-            desc.remove(less_link[0])
-        comments = tostring(desc, method='html', encoding=unicode).strip()
-        while comments.find('  ') >= 0:
-            comments = comments.replace('  ', ' ')
-        if "Fil størrelse:" in comments:
-            comments = comments.replace(comments.split(".")[-1], "</p>")
-        comments = sanitize_comments_html(comments)
-        return comments
-
 class Worker(Thread):  # Get details
     '''
     Get book details from Saxos book page in a separate thread
@@ -203,6 +183,8 @@ class Worker(Thread):  # Get details
         self.browser = browser.clone_browser()
         self.cover_url = None
         self.authors = []
+        self.series = None
+        self.series_index = None
         self.comments = None
         self.pubdate = None
         self.tags = None
@@ -272,12 +254,24 @@ class Worker(Thread):  # Get details
         # Get the author of the book
         try:
             author_node = root.xpath('//span[@class="expandAuthorName"]')
-            author_node = author_node[0].text.split(",")
-            for name in author_node:
+            author_strings = author_node[0].text.split(",")
+            #print(author_strings)
+            for name in author_strings:
                 self.authors.append(name)
         except:
             self.log.exception('Error parsing authors for url: %r' % self.url)
             self.authors = None
+
+        # Get the series of the book
+        try:
+            series_node = root.xpath('//b[contains(text(), "Serie")]/a')
+            if len(series_node) > 0:
+                self.series = series_node[0].text.split(": ")[0].strip()
+                self.series_index = series_node[0].text.split(": ")[-1].strip()
+            #    print("'%s'" % self.series)
+            #    print("'%s'" % self.series_index)
+        except:
+            self.log.exception('Error parsing series for url: %r' % self.url)
 
         # Some books have ratings, let's use them.
         try:
@@ -289,7 +283,8 @@ class Worker(Thread):  # Get details
         # Get the ISBN number from the site
         try:
             isbn_node = root.xpath('//div[@class="eBookContainer"]/b/span[@itemprop="identifier"]')
-            self.isbn = isbn_node[0].text.replace("ISBN: ", "").strip()
+            if len(isbn_node) > 0:
+                self.isbn = isbn_node[0].text.replace("ISBN: ", "").strip()
         except:
             self.log.exception('Error parsing isbn for url: %r' % self.url)
             self.isbn = None
@@ -315,7 +310,8 @@ class Worker(Thread):  # Get details
         # Get the publisher name
         try:
             publisher_node = root.xpath('//div[@class="eBookContainer"]/b/span/a[@itemprop="brand"]')
-            self.publisher = publisher_node[0].text
+            if len(publisher_node) > 0:
+                self.publisher = publisher_node[0].text
         except:
             self.log.exception('Error parsing publisher for url: %r' % self.url)
 
@@ -331,18 +327,21 @@ class Worker(Thread):  # Get details
         # Get the publisher date
         try:
             pubdate_node = root.xpath('//div[@class="eBookContainer"]/b[contains(text(),"Udgivet:")]')
-            date_str = pubdate_node[0].text.replace("Udgivet:", "").strip()
-            format_str = '%Y-%m-%d' # The format
-            self.pubdate = datetime.datetime.strptime(date_str, format_str)
+            if len(pubdate_node) > 0:
+                date_str = pubdate_node[0].text.replace("Udgivet:", "").strip()
+                format_str = '%Y-%m-%d' # The format
+                self.pubdate = datetime.datetime.strptime(date_str, format_str)
         except:
             self.log.exception('Error parsing published date for url: %r' % self.url)
 
         # Get the tags
         try:
+            tags = []
             tags_node = root.xpath('//span[@itemprop="category"]')
-            self.tags = tags_node[0].text.split()
+            tags.append(tags_node[0].text.strip())
+            self.tags = tags
         except:
-            self.log.exception('Error parsing published date for url: %r' % self.url)
+            self.log.exception('Error parsing tags for url: %r' % self.url)
 
         # Setup the metadata
         meta_data = Metadata(self.title, self.authors)
@@ -350,13 +349,12 @@ class Worker(Thread):  # Get details
         meta_data.set_identifier('mofibo', self.url)
 
         # Set rating
-        """
-        if self.rating:
+        if self.series:
             try:
-                meta_data.rating = self.rating
+                meta_data.series = self.series
+                meta_data.series_index = self.series_index
             except:
-                self.log.exception('Error loading rating')
-        """
+                self.log.exception('Error loading series')
         # Set ISBN
         if self.isbn:
             try:
@@ -415,23 +413,15 @@ if __name__ == '__main__':  # tests
     # calibre-customize -b . ; calibre-debug -e __init__.py
     from calibre.ebooks.metadata.sources.test import (test_identify_plugin, title_test, authors_test)
 
-    tests = [(  # A book with an ISBN
-                {
-                'identifiers': {'isbn': '9788740065756'},
-                'title': 'Casper', 
-                'authors': ['Martin Kongstad']
-                },[
-                    title_test('Casper', exact=True),
-                    authors_test(['Martin Kongstad'])]
-            ), 
+    tests = [
             (   # A book with two Authors
                 {
-                'identifiers': {'isbn': '9788771761306'},
-                'title': 'Elverfolket- Ulverytterne og solfolket', 
-                'authors': ['Richard Pini & Wendy']
+                'identifiers': {'isbn': '9788763847902'},
+                'title': 'Den faldne djævel', 
+                'authors': ['Kenneth Bøgh Andersen']
                 },[
-                    title_test('Elverfolket- Ulverytterne og solfolket', exact=True),
-                    authors_test(['Richard Pini', 'Wendy'])]
+                    title_test('Den faldne djævel', exact=True),
+                    authors_test(['Kenneth Bøgh Andersen'])]
             )
             ]
 
